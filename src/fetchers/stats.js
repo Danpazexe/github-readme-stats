@@ -13,6 +13,37 @@ import { request } from "../common/http.js";
 
 dotenv.config();
 
+/**
+ * Drop FORBIDDEN errors raised on `stargazers` fields.
+ *
+ * Fine-grained personal access tokens cannot read the `stargazers` connection
+ * over GraphQL, even with Metadata read access. GitHub reports one error per
+ * offending field and nulls out the whole repository node, so the surviving
+ * payload carries a `nodes` array of nulls. Discarding those errors and the
+ * dead nodes lets the card render with a star count of 0 rather than failing.
+ *
+ * @param {object} res Axios response holding the GraphQL payload.
+ * @returns {void}
+ */
+const ignoreForbiddenStargazers = (res) => {
+  if (!res.data.errors) {
+    return;
+  }
+  const remaining = res.data.errors.filter(
+    (error) =>
+      !(error.type === "FORBIDDEN" && (error.path || []).includes("stargazers")),
+  );
+  if (remaining.length === res.data.errors.length) {
+    return;
+  }
+  res.data.errors = remaining.length ? remaining : undefined;
+
+  const repositories = res.data.data?.user?.repositories;
+  if (Array.isArray(repositories?.nodes)) {
+    repositories.nodes = repositories.nodes.filter(Boolean);
+  }
+};
+
 // GraphQL queries.
 const GRAPHQL_REPOS_FIELD = `
   repositories(first: 100, ownerAffiliations: OWNER, orderBy: {direction: DESC, field: STARGAZERS}, after: $after) {
@@ -132,6 +163,7 @@ const statsFetcher = async ({
       startTime,
     };
     let res = await retryer(fetcher, variables);
+    ignoreForbiddenStargazers(res);
     if (res.data.errors) {
       return res;
     }
@@ -146,7 +178,7 @@ const statsFetcher = async ({
 
     // Disable multi page fetching on public Vercel instance due to rate limits.
     const repoNodesWithStars = repoNodes.filter(
-      (node) => node.stargazers.totalCount !== 0,
+      (node) => (node.stargazers?.totalCount ?? 0) !== 0,
     );
     hasNextPage =
       process.env.FETCH_MULTI_PAGE_STARS === "true" &&
@@ -319,7 +351,7 @@ const fetchStats = async (
       return !repoToHide.has(data.name);
     })
     .reduce((prev, curr) => {
-      return prev + curr.stargazers.totalCount;
+      return prev + (curr.stargazers?.totalCount ?? 0);
     }, 0);
 
   stats.rank = calculateRank({
